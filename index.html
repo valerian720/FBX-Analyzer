@@ -1,0 +1,381 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FBX Analyzer — UV & Vertex Color</title>
+    <style>
+        body {
+            font-family: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+            max-width: 1100px;
+            margin: 0 auto;
+            padding: 20px;
+            background: #f5f7fa;
+            color: #1a202c;
+        }
+        h1 { margin-bottom: 0.3em; }
+        .sub { color: #4a5568; margin-top: 0; }
+        .upload-box {
+            background: white;
+            border: 2px dashed #cbd5e0;
+            border-radius: 12px;
+            padding: 30px;
+            text-align: center;
+            margin: 25px 0;
+            transition: border-color 0.2s;
+        }
+        .upload-box:hover { border-color: #4299e1; }
+        input[type="file"] { display: none; }
+        label[for="fbx-input"] {
+            display: inline-block;
+            background: #4299e1;
+            color: white;
+            padding: 12px 28px;
+            border-radius: 8px;
+            cursor: pointer;
+            font-weight: 600;
+            transition: background 0.2s;
+        }
+        label[for="fbx-input"]:hover { background: #3182ce; }
+        #status { margin-top: 15px; color: #4a5568; font-size: 0.95rem; }
+        .section {
+            background: white;
+            border-radius: 10px;
+            padding: 20px 24px;
+            margin-bottom: 20px;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+        }
+        .section h2 {
+            margin-top: 0;
+            font-size: 1.25rem;
+            border-bottom: 1px solid #e2e8f0;
+            padding-bottom: 10px;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 0.9rem;
+        }
+        th, td {
+            text-align: left;
+            padding: 8px 10px;
+            border-bottom: 1px solid #edf2f7;
+            vertical-align: top;
+        }
+        th {
+            background: #f7fafc;
+            font-weight: 600;
+            color: #2d3748;
+        }
+        tr:last-child td { border-bottom: none; }
+        .badge {
+            display: inline-block;
+            padding: 2px 10px;
+            border-radius: 12px;
+            font-size: 0.8rem;
+            font-weight: 600;
+        }
+        .badge-yes { background: #c6f6d5; color: #22543d; }
+        .badge-no  { background: #fed7d7; color: #742a2a; }
+        .badge-uv  { background: #bee3f8; color: #2a4365; }
+        .badge-color { background: #fefcbf; color: #744210; }
+        .empty { color: #a0aec0; font-style: italic; }
+        .error { color: #c53030; background: #fff5f5; padding: 15px; border-radius: 8px; }
+        .grid-summary {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+            gap: 12px;
+        }
+        .summary-card {
+            background: #f7fafc;
+            border-radius: 8px;
+            padding: 14px;
+            text-align: center;
+        }
+        .summary-card .number {
+            font-size: 1.8rem;
+            font-weight: 700;
+            color: #2b6cb0;
+        }
+        .summary-card .label { font-size: 0.8rem; color: #718096; text-transform: uppercase; letter-spacing: 0.5px; }
+    </style>
+</head>
+<body>
+
+    <h1>FBX Analyzer</h1>
+    <p class="sub">Анализ UV-каналов и vertex color без рендеринга модели</p>
+
+    <div class="upload-box">
+        <input type="file" id="fbx-input" accept=".fbx">
+        <label for="fbx-input">Выбрать .fbx файл</label>
+        <div id="status">Файл не выбран</div>
+    </div>
+
+    <div id="output"></div>
+
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+                "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+            }
+        }
+    </script>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { FBXLoader } from 'three/addons/loaders/FBXLoader.js';
+
+        const fileInput = document.getElementById('fbx-input');
+        const statusEl  = document.getElementById('status');
+        const outputEl  = document.getElementById('output');
+
+        // ---------- вспомогательные функции вывода ----------
+        function el(tag, attrs = {}, ...children) {
+            const node = document.createElement(tag);
+            Object.entries(attrs).forEach(([k, v]) => {
+                if (k === 'class') node.className = v;
+                else if (k === 'html') node.innerHTML = v;
+                else node.setAttribute(k, v);
+            });
+
+            // Рекурсивно разворачиваем массивы и пропускаем null/undefined
+            function appendChild(child) {
+                if (child === null || child === undefined || child === false) return;
+                if (Array.isArray(child)) {
+                    child.forEach(appendChild);
+                    return;
+                }
+                if (child instanceof Node) {
+                    node.appendChild(child);
+                } else {
+                    // числа, строки и прочее — приводим к тексту
+                    node.appendChild(document.createTextNode(String(child)));
+                }
+            }
+            children.forEach(appendChild);
+
+            return node;
+        }
+
+        function badge(text, type = 'yes') {
+            return el('span', { class: `badge badge-${type}` }, text);
+        }
+
+        function summaryCard(number, label) {
+            return el('div', { class: 'summary-card' },
+                el('div', { class: 'number' }, String(number)),
+                el('div', { class: 'label' }, label)
+            );
+        }
+
+        function section(title, content) {
+            const sec = el('div', { class: 'section' });
+            sec.appendChild(el('h2', {}, title));
+            sec.appendChild(content);
+            return sec;
+        }
+
+        // ---------- основная логика ----------
+        fileInput.addEventListener('change', (event) => {
+            const file = event.target.files[0];
+            if (!file) return;
+
+            statusEl.textContent = `Читаю «${file.name}»…`;
+            outputEl.innerHTML = '';
+
+            const reader = new FileReader();
+
+            reader.onload = (e) => {
+                const buffer = e.target.result;
+                statusEl.textContent = 'Разбираю FBX…';
+
+                try {
+                    const loader = new FBXLoader();
+                    const scene = loader.parse(buffer, '');
+
+                    statusEl.textContent = `Готово: «${file.name}» (${(file.size / 1024).toFixed(1)} КБ)`;
+                    renderReport(scene, file);
+                } catch (err) {
+                    console.error(err);
+                    statusEl.textContent = 'Ошибка разбора';
+                    outputEl.appendChild(
+                        el('div', { class: 'error' },
+                            el('strong', {}, 'Не удалось разобрать FBX. '),
+                            el('span', {}, err.message || String(err))
+                        )
+                    );
+                }
+            };
+
+            reader.onerror = () => {
+                statusEl.textContent = 'Ошибка чтения файла';
+            };
+
+            reader.readAsArrayBuffer(file);
+        });
+
+        // ---------- формирование отчёта ----------
+        function renderReport(root, file) {
+            const meshes = [];
+            const animations = [];
+            const skeletons = [];
+            const morphTargetMeshes = [];
+            let cameraCount = 0;
+            let lightCount = 0;
+
+            root.traverse((obj) => {
+                if (obj.isMesh && obj.geometry) {
+                    meshes.push(obj);
+                    if (obj.morphTargetInfluences && obj.morphTargetInfluences.length > 0) {
+                        morphTargetMeshes.push(obj);
+                    }
+                }
+                if (obj.isSkinnedMesh) {
+                    skeletons.push(obj);
+                }
+                if (obj.isCamera) cameraCount++;
+                if (obj.isLight)  lightCount++;
+            });
+
+            if (root.animations && root.animations.length > 0) {
+                animations.push(...root.animations);
+            }
+
+            // ----- 1. Сводка по контейнеру -----
+            const summaryGrid = el('div', { class: 'grid-summary' });
+            summaryGrid.appendChild(summaryCard(meshes.length, 'Мешей'));
+            summaryGrid.appendChild(summaryCard(
+                meshes.reduce((s, m) => s + (m.geometry.attributes.position?.count ?? 0), 0),
+                'Всего вершин'
+            ));
+            summaryGrid.appendChild(summaryCard(
+                meshes.reduce((s, m) => {
+                    const idx = m.geometry.index;
+                    return s + (idx ? idx.count / 3 : (m.geometry.attributes.position?.count ?? 0) / 3);
+                }, 0),
+                'Всего треугольников'
+            ));
+            summaryGrid.appendChild(summaryCard(animations.length, 'Анимаций'));
+            summaryGrid.appendChild(summaryCard(skeletons.length, 'Скелетных мешей'));
+            summaryGrid.appendChild(summaryCard(morphTargetMeshes.length, 'С морф-таргетами'));
+            summaryGrid.appendChild(summaryCard(cameraCount, 'Камер'));
+            summaryGrid.appendChild(summaryCard(lightCount, 'Источников света'));
+
+            outputEl.appendChild(section('Сводка по контейнеру', summaryGrid));
+
+            // ----- 2. Анимации -----
+            if (animations.length > 0) {
+                const animList = el('ul', {});
+                animations.forEach((clip) => {
+                    animList.appendChild(el('li', {},
+                        el('strong', {}, clip.name || '(без имени)'),
+                        ` — ${clip.duration.toFixed(3)} с, ${clip.tracks.length} дорожек`
+                    ));
+                });
+                outputEl.appendChild(section('Анимации', animList));
+            }
+
+            // ----- 3. Таблица мешей -----
+            if (meshes.length === 0) {
+                outputEl.appendChild(section('Меши', el('p', { class: 'empty' }, 'В файле не найдено ни одного меша.')));
+                return;
+            }
+
+            const table = el('table', {});
+            const thead = el('thead', {});
+            const headerRow = el('tr', {});
+            ['#', 'Имя меша', 'Верш.', 'Треуг.', 'UV-каналы', 'Vertex Color', 'Материалы', 'Морф-таргеты']
+                .forEach((h) => headerRow.appendChild(el('th', {}, h)));
+            thead.appendChild(headerRow);
+            table.appendChild(thead);
+
+            const tbody = el('tbody', {});
+
+            meshes.forEach((mesh, i) => {
+                const geo = mesh.geometry;
+                const attrs = geo.attributes;
+
+                const vertexCount = attrs.position?.count ?? 0;
+                const triCount = geo.index
+                    ? geo.index.count / 3
+                    : vertexCount / 3;
+
+                // ----- UV-каналы -----
+                const uvNames = Object.keys(attrs)
+                    .filter((name) => /^uv\d*$/.test(name))
+                    .sort();
+
+                const uvCell = uvNames.length > 0
+                    ? uvNames.map((name) => {
+                        const attr = attrs[name];
+                        return el('div', {},
+                            badge(name, 'uv'),
+                            ` itemSize: ${attr.itemSize}, count: ${attr.count}`
+                        );
+                    })
+                    : el('span', { class: 'empty' }, 'нет');
+
+                // ----- Vertex Color -----
+                const colorAttr = attrs.color;
+                const colorCell = colorAttr
+                    ? el('div', {},
+                        badge('color', 'color'),
+                        ` itemSize: ${colorAttr.itemSize}, count: ${colorAttr.count}`,
+                        colorAttr.itemSize === 4 ? ' (RGBA)' : ' (RGB)'
+                    )
+                    : badge('нет', 'no');
+
+                // ----- Группы материалов -----
+                const materialGroups = geo.groups.length;
+                const materialNames = Array.isArray(mesh.material)
+                    ? mesh.material.map((m) => m.name || '(без имени)').join(', ')
+                    : (mesh.material?.name || '—');
+
+                const matCell = materialGroups > 0
+                    ? `${materialGroups} групп: ${materialNames}`
+                    : materialNames;
+
+                // ----- Морф-таргеты -----
+                const morphCount = mesh.morphTargetInfluences?.length ?? 0;
+                const morphCell = morphCount > 0
+                    ? badge(`${morphCount}`, 'yes')
+                    : badge('—', 'no');
+
+                const row = el('tr', {},
+                    el('td', {}, String(i + 1)),
+                    el('td', {}, mesh.name || '(без имени)'),
+                    el('td', {}, String(vertexCount)),
+                    el('td', {}, String(Math.round(triCount))),
+                    el('td', {}, uvCell),
+                    el('td', {}, colorCell),
+                    el('td', {}, matCell),
+                    el('td', {}, morphCell)
+                );
+                tbody.appendChild(row);
+            });
+
+            table.appendChild(tbody);
+            outputEl.appendChild(section('Меши: UV и Vertex Color', table));
+
+            // ----- 4. Детализация по UV-каналам (сводно) -----
+            const totalUVChannels = meshes.reduce((s, m) => {
+                return s + Object.keys(m.geometry.attributes).filter((n) => /^uv\d*$/.test(n)).length;
+            }, 0);
+
+            const totalWithColor = meshes.filter((m) => m.geometry.attributes.color).length;
+
+            const detail = el('div', {});
+            detail.appendChild(el('p', {},
+                `Всего UV-каналов во всех мешах: `,
+                el('strong', {}, String(totalUVChannels))
+            ));
+            detail.appendChild(el('p', {},
+                `Мешей с vertex color: `,
+                el('strong', {}, `${totalWithColor} из ${meshes.length}`)
+            ));
+            outputEl.appendChild(section('Детализация UV / Color', detail));
+        }
+    </script>
+</body>
+</html>
